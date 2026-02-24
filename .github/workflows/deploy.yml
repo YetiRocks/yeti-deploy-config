@@ -94,19 +94,23 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
-            # Initialize on first deploy (headless setup)
-            # After init, yeti continues to start the server, so we use timeout
-            # to let it initialize then kill it. Systemd manages the actual service.
-            if [ ! -d /opt/yeti/data ]; then
-              echo "First deploy: initializing Yeti..."
+            # Initialize if not already set up
+            # Yeti checks ~/.yeti/settings.toml to know if it's initialized.
+            # After init, yeti starts the server, so we use timeout to let it
+            # initialize then kill it. Systemd manages the actual service.
+            if [ ! -f /root/.yeti/settings.toml ]; then
+              echo "Initializing Yeti (first deploy)..."
               cd /opt/yeti
-              timeout 30 ./yeti -f --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms || true
-              if [ -d /opt/yeti/data ]; then
+              timeout 30 ./yeti -f --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms 2>&1 || true
+              if [ -f /root/.yeti/settings.toml ]; then
                 echo "Initialization complete."
+                cat /root/.yeti/settings.toml
               else
-                echo "::error::Yeti initialization failed — /opt/yeti/data not created"
+                echo "::error::Yeti initialization failed"
                 exit 1
               fi
+            else
+              echo "Yeti already initialized, skipping setup."
             fi
 
             # Install/update systemd service
