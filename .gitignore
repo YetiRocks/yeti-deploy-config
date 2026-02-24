@@ -1,0 +1,4 @@
+.env
+deploy/
+deploy.tar.gz
+applications/

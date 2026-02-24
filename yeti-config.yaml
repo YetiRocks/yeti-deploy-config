@@ -1,0 +1,25 @@
+# Yeti Server Configuration
+# Only include overrides — everything else uses sensible defaults.
+# Full reference: https://yetirocks.com/documentation/reference/server-config.html
+
+environment: production
+rootDirectory: /opt/yeti
+http:
+  port: 443
+storage:
+  mode: embedded
+logging:
+  level: info
+tls:
+  autoGenerate: true
+
+# Applications to deploy (git repos cloned by the GitHub Action, not parsed by Yeti)
+applications:
+  - https://github.com/yetirocks/www
+  - https://github.com/yetirocks/documentation
+  - https://github.com/yetirocks/demo-basic
+  - https://github.com/yetirocks/demo-fiql
+  - https://github.com/yetirocks/demo-graphql
+  - https://github.com/yetirocks/demo-realtime
+  - https://github.com/yetirocks/demo-vector
+  - https://github.com/yetirocks/demo-authentication

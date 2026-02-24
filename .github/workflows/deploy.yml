@@ -1,0 +1,134 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  YETI_BINARY_URL: https://yeti-releases.us-east-1.linodeobjects.com/latest/yeti-linux-x86_64
+  DEPLOY_PATH: /opt/yeti
+
+jobs:
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download yeti binary
+        run: |
+          HTTP_CODE=$(curl -sSL -w "%{http_code}" -o yeti "$YETI_BINARY_URL" 2>/dev/null)
+          if [ "$HTTP_CODE" != "200" ] || [ ! -s yeti ]; then
+            echo "::error::Failed to download yeti binary from $YETI_BINARY_URL (HTTP $HTTP_CODE)"
+            echo ""
+            echo "The yeti-core binary has not been published yet."
+            echo "Build and upload it from the yeti-core repo first:"
+            echo "  1. Push a version tag (v*) to yeti-core to trigger the release workflow"
+            echo "  2. The release workflow builds the binary and uploads to Linode Object Storage"
+            echo "  3. Re-run this workflow after the binary is available"
+            exit 1
+          fi
+          chmod +x yeti
+          ./yeti --version
+
+      - name: Clone applications
+        run: |
+          mkdir -p applications
+
+          # Parse application URLs from yeti-config.yaml
+          APPS=$(grep -A100 '^applications:' yeti-config.yaml | grep '^\s*-' | sed 's/^\s*-\s*//')
+
+          for url in $APPS; do
+            app_name=$(basename "$url" .git)
+            echo "Cloning $app_name from $url..."
+            git clone --depth 1 "$url" "applications/$app_name" || echo "Warning: Failed to clone $app_name"
+          done
+
+          echo "Applications:"
+          ls applications/
+
+      - name: Package deployment
+        run: |
+          mkdir -p deploy
+          cp yeti deploy/
+          cp yeti-config.yaml deploy/
+          cp -r applications deploy/
+
+          # Remove unnecessary files from apps
+          find deploy/applications -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deploy/applications -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deploy/applications -name "source" -type d -exec rm -rf {} + 2>/dev/null || true
+          find deploy/applications -name "target" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          tar czf deploy.tar.gz -C deploy .
+          echo "Package size: $(du -h deploy.tar.gz | cut -f1)"
+
+      - name: Deploy to server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          # Set up SSH
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@$DEPLOY_HOST"
+          SCP="scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
+
+          # Upload package
+          $SCP deploy.tar.gz "root@$DEPLOY_HOST:/tmp/deploy.tar.gz"
+
+          # Deploy on server
+          $SSH << 'REMOTE'
+            set -e
+
+            # Stop service if running
+            systemctl stop yeti 2>/dev/null || true
+
+            # Extract deployment
+            mkdir -p /opt/yeti
+            tar xzf /tmp/deploy.tar.gz -C /opt/yeti
+            rm /tmp/deploy.tar.gz
+
+            # Ensure systemd service exists
+            if [ ! -f /etc/systemd/system/yeti.service ]; then
+              cat > /etc/systemd/system/yeti.service << 'SERVICE'
+          [Unit]
+          Description=Yeti Application Platform
+          After=network.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/yeti
+          ExecStart=/opt/yeti/yeti
+          Restart=always
+          RestartSec=5
+          Environment=ROOT_DIRECTORY=/opt/yeti
+          Environment=SETTINGS_PATH=/opt/yeti/yeti-config.yaml
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+              systemctl daemon-reload
+              systemctl enable yeti
+            fi
+
+            # Start service
+            systemctl start yeti
+
+            # Wait for health check
+            for i in $(seq 1 30); do
+              sleep 2
+              if curl -sk https://localhost/health > /dev/null 2>&1; then
+                echo "Yeti is healthy"
+                curl -sk https://localhost/health
+                exit 0
+              fi
+            done
+            echo "Warning: Health check did not pass within 60s"
+            journalctl -u yeti --no-pager -n 20
+          REMOTE
