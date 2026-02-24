@@ -127,18 +127,18 @@ jobs:
             fi
 
             # Ensure production config is in place (bootstrap may have overwritten it)
-            cat > /opt/yeti/yeti-config.yaml << 'CONFIG'
-          environment: production
-          rootDirectory: /opt/yeti
-          http:
-            port: 443
-          storage:
-            mode: embedded
-          logging:
-            level: info
-          tls:
-            autoGenerate: true
-          CONFIG
+            printf '%s\n' \
+              'environment: production' \
+              'rootDirectory: /opt/yeti' \
+              'http:' \
+              '  port: 443' \
+              'storage:' \
+              '  mode: embedded' \
+              'logging:' \
+              '  level: info' \
+              'tls:' \
+              '  autoGenerate: true' \
+              > /opt/yeti/yeti-config.yaml
 
             # Ensure TLS certificates exist
             if [ ! -f /opt/yeti/certs/localhost/cert.pem ]; then
