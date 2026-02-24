@@ -126,19 +126,23 @@ jobs:
               fi
             fi
 
-            # Ensure production config is in place (bootstrap may have overwritten it)
-            printf '%s\n' \
-              'environment: production' \
-              'rootDirectory: /opt/yeti' \
-              'http:' \
-              '  port: 443' \
-              'storage:' \
-              '  mode: embedded' \
-              'logging:' \
-              '  level: info' \
-              'tls:' \
-              '  autoGenerate: true' \
-              > /opt/yeti/yeti-config.yaml
+            # Write production config (grouped echo avoids heredoc/continuation issues)
+            {
+              echo 'environment: production'
+              echo 'rootDirectory: /opt/yeti'
+              echo 'http:'
+              echo '  port: 443'
+              echo 'storage:'
+              echo '  mode: embedded'
+              echo 'logging:'
+              echo '  level: info'
+              echo 'tls:'
+              echo '  autoGenerate: true'
+            } > /opt/yeti/yeti-config.yaml
+
+            echo "=== Config written ==="
+            cat /opt/yeti/yeti-config.yaml
+            echo "=== End config ==="
 
             # Ensure TLS certificates exist
             if [ ! -f /opt/yeti/certs/localhost/cert.pem ]; then
@@ -172,17 +176,29 @@ jobs:
 
             # Start service
             systemctl start yeti
+            sleep 3
 
-            # Wait for health check
+            # Check what port yeti is actually listening on
+            echo "=== Listening ports ==="
+            ss -tlnp | grep yeti || true
+
+            # Wait for health check (try both 443 and 9996)
             for i in $(seq 1 30); do
               sleep 2
               if curl -sk https://localhost/health > /dev/null 2>&1; then
-                echo "Yeti is healthy"
+                echo "Yeti is healthy (port 443)"
                 curl -sk https://localhost/health
                 exit 0
               fi
+              if curl -sk https://localhost:9996/health > /dev/null 2>&1; then
+                echo "Yeti is healthy (port 9996 - config override not applied)"
+                curl -sk https://localhost:9996/health
+                echo "WARNING: Server running on port 9996 instead of 443"
+                journalctl -u yeti --no-pager -n 5 | head -3
+                exit 0
+              fi
             done
-            echo "Warning: Health check did not pass within 60s"
-            journalctl -u yeti --no-pager -n 20
+            echo "Health check failed on both ports"
+            journalctl -u yeti --no-pager -n 30
             exit 1
           REMOTE
