@@ -94,23 +94,32 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
-            # Initialize if not already set up
-            # Yeti checks ~/.yeti/settings.toml to know if it's initialized.
-            # After init, yeti starts the server, so we use timeout to let it
-            # initialize then kill it. Systemd manages the actual service.
-            if [ ! -f /root/.yeti/settings.toml ]; then
-              echo "Initializing Yeti (first deploy)..."
+            # Initialize if needed.
+            # Yeti checks ~/.yeti/settings.toml for root_directory.
+            # Force re-init if settings point elsewhere or don't exist.
+            NEEDS_INIT=true
+            if [ -f /root/.yeti/settings.toml ]; then
+              if grep -q 'root_directory = "/opt/yeti"' /root/.yeti/settings.toml; then
+                NEEDS_INIT=false
+                echo "Yeti already initialized for /opt/yeti."
+              else
+                echo "Stale settings.toml found, reinitializing..."
+                rm -f /root/.yeti/settings.toml
+              fi
+            fi
+
+            if [ "$NEEDS_INIT" = true ]; then
+              echo "Initializing Yeti..."
               cd /opt/yeti
+              # Init creates settings.toml then starts the server; timeout kills it
               timeout 30 ./yeti -f --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms 2>&1 || true
               if [ -f /root/.yeti/settings.toml ]; then
-                echo "Initialization complete."
+                echo "Initialization complete:"
                 cat /root/.yeti/settings.toml
               else
                 echo "::error::Yeti initialization failed"
                 exit 1
               fi
-            else
-              echo "Yeti already initialized, skipping setup."
             fi
 
             # Install/update systemd service
