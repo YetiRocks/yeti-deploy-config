@@ -126,6 +126,30 @@ jobs:
               fi
             fi
 
+            # Ensure production config is in place (bootstrap may have overwritten it)
+            cat > /opt/yeti/yeti-config.yaml << 'CONFIG'
+          environment: production
+          rootDirectory: /opt/yeti
+          http:
+            port: 443
+          storage:
+            mode: embedded
+          logging:
+            level: info
+          tls:
+            autoGenerate: true
+          CONFIG
+
+            # Ensure TLS certificates exist
+            if [ ! -f /opt/yeti/certs/localhost/cert.pem ]; then
+              echo "Generating self-signed TLS certificate..."
+              mkdir -p /opt/yeti/certs/localhost
+              openssl req -x509 -newkey rsa:2048 -keyout /opt/yeti/certs/localhost/key.pem \
+                -out /opt/yeti/certs/localhost/cert.pem -days 365 -nodes \
+                -subj "/CN=localhost" 2>/dev/null
+              echo "TLS certificate generated."
+            fi
+
             # Install/update systemd service
             cat > /etc/systemd/system/yeti.service << 'SERVICE'
           [Unit]
