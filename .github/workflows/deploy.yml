@@ -111,8 +111,12 @@ jobs:
             if [ "$NEEDS_INIT" = true ]; then
               echo "Initializing Yeti..."
               cd /opt/yeti
+              # Save production config before init (bootstrap overwrites it)
+              cp /opt/yeti/yeti-config.yaml /tmp/yeti-config.yaml.bak
               # Init creates settings.toml then starts the server; timeout kills it
               timeout 30 ./yeti -f --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms 2>&1 || true
+              # Restore production config
+              cp /tmp/yeti-config.yaml.bak /opt/yeti/yeti-config.yaml
               if [ -f /root/.yeti/settings.toml ]; then
                 echo "Initialization complete:"
                 cat /root/.yeti/settings.toml
