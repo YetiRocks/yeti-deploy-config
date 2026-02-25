@@ -7,7 +7,6 @@ on:
 
 env:
   YETI_BINARY_URL: https://yeti-releases.us-east-1.linodeobjects.com/latest/yeti-linux-x86_64
-  DEPLOY_PATH: /opt/yeti
 
 jobs:
   deploy:
@@ -20,13 +19,7 @@ jobs:
         run: |
           HTTP_CODE=$(curl -sSL -w "%{http_code}" -o yeti "$YETI_BINARY_URL" 2>/dev/null)
           if [ "$HTTP_CODE" != "200" ] || [ ! -s yeti ]; then
-            echo "::error::Failed to download yeti binary from $YETI_BINARY_URL (HTTP $HTTP_CODE)"
-            echo ""
-            echo "The yeti-core binary has not been published yet."
-            echo "Build and upload it from the yeti-core repo first:"
-            echo "  1. Push a version tag (v*) to yeti-core to trigger the release workflow"
-            echo "  2. The release workflow builds the binary and uploads to Linode Object Storage"
-            echo "  3. Re-run this workflow after the binary is available"
+            echo "::error::Failed to download yeti binary (HTTP $HTTP_CODE)"
             exit 1
           fi
           chmod +x yeti
@@ -35,17 +28,12 @@ jobs:
       - name: Clone applications
         run: |
           mkdir -p applications
-
-          # Parse application URLs from yeti-config.yaml
           APPS=$(grep -A100 '^applications:' yeti-config.yaml | grep '^\s*-' | sed 's/^\s*-\s*//')
-
           for url in $APPS; do
             app_name=$(basename "$url" .git)
-            echo "Cloning $app_name from $url..."
+            echo "Cloning $app_name..."
             git clone --depth 1 "$url" "applications/$app_name" || echo "Warning: Failed to clone $app_name"
           done
-
-          echo "Applications:"
           ls applications/
 
       - name: Package deployment
@@ -54,13 +42,10 @@ jobs:
           cp yeti deploy/
           cp yeti-config.yaml deploy/
           cp -r applications deploy/
-
-          # Remove unnecessary files from apps
           find deploy/applications -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "source" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "target" -type d -exec rm -rf {} + 2>/dev/null || true
-
           tar czf deploy.tar.gz -C deploy .
           echo "Package size: $(du -h deploy.tar.gz | cut -f1)"
 
@@ -70,7 +55,6 @@ jobs:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: |
-          # Set up SSH
           mkdir -p ~/.ssh
           echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
@@ -79,82 +63,32 @@ jobs:
           SSH="ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no root@$DEPLOY_HOST"
           SCP="scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no"
 
-          # Upload package
           $SCP deploy.tar.gz "root@$DEPLOY_HOST:/tmp/deploy.tar.gz"
 
-          # Deploy on server
           $SSH "ADMIN_PASSWORD=$ADMIN_PASSWORD bash -s" << 'REMOTE'
             set -e
 
-            # Stop service if running
             systemctl stop yeti 2>/dev/null || true
 
-            # Extract deployment
             mkdir -p /opt/yeti
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
-            # Initialize if needed.
-            # Yeti checks ~/.yeti/settings.toml for root_directory.
-            # Force re-init if settings point elsewhere or don't exist.
-            NEEDS_INIT=true
-            if [ -f /root/.yeti/settings.toml ]; then
-              if grep -q 'root_directory = "/opt/yeti"' /root/.yeti/settings.toml; then
-                NEEDS_INIT=false
-                echo "Yeti already initialized for /opt/yeti."
-              else
-                echo "Stale settings.toml found, reinitializing..."
-                rm -f /root/.yeti/settings.toml
-              fi
+            # Initialize if needed (creates dirs, certs, admin user, settings.toml)
+            # Bootstrap preserves existing yeti-config.yaml from the deployment package.
+            NEEDS_INIT=false
+            if [ ! -f /root/.yeti/settings.toml ]; then
+              NEEDS_INIT=true
+            elif ! grep -q '/opt/yeti' /root/.yeti/settings.toml; then
+              NEEDS_INIT=true
+              rm -f /root/.yeti/settings.toml
             fi
 
             if [ "$NEEDS_INIT" = true ]; then
               echo "Initializing Yeti..."
-              cd /opt/yeti
-              # Save production config before init (bootstrap overwrites it)
-              cp /opt/yeti/yeti-config.yaml /tmp/yeti-config.yaml.bak
-              # Init creates settings.toml then starts the server; timeout kills it
-              timeout 30 ./yeti -f --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms 2>&1 || true
-              # Restore production config
-              cp /tmp/yeti-config.yaml.bak /opt/yeti/yeti-config.yaml
-              if [ -f /root/.yeti/settings.toml ]; then
-                echo "Initialization complete:"
-                cat /root/.yeti/settings.toml
-              else
-                echo "::error::Yeti initialization failed"
-                exit 1
-              fi
+              /opt/yeti/yeti --init-only --dir /opt/yeti --admin-password "$ADMIN_PASSWORD" --agree-to-terms
             fi
 
-            # Write production config (grouped echo avoids heredoc/continuation issues)
-            {
-              echo 'environment: production'
-              echo 'rootDirectory: /opt/yeti'
-              echo 'http:'
-              echo '  port: 443'
-              echo 'storage:'
-              echo '  mode: embedded'
-              echo 'logging:'
-              echo '  level: info'
-              echo 'tls:'
-              echo '  autoGenerate: true'
-            } > /opt/yeti/yeti-config.yaml
-
-            echo "=== Config written ==="
-            cat /opt/yeti/yeti-config.yaml
-            echo "=== End config ==="
-
-            # Ensure TLS certificates exist
-            if [ ! -f /opt/yeti/certs/localhost/cert.pem ]; then
-              echo "Generating self-signed TLS certificate..."
-              mkdir -p /opt/yeti/certs/localhost
-              openssl req -x509 -newkey rsa:2048 -keyout /opt/yeti/certs/localhost/key.pem \
-                -out /opt/yeti/certs/localhost/cert.pem -days 365 -nodes \
-                -subj "/CN=localhost" 2>/dev/null
-              echo "TLS certificate generated."
-            fi
-
-            # Install/update systemd service
             cat > /etc/systemd/system/yeti.service << 'SERVICE'
           [Unit]
           Description=Yeti Application Platform
@@ -173,32 +107,17 @@ jobs:
           SERVICE
             systemctl daemon-reload
             systemctl enable yeti
-
-            # Start service
             systemctl start yeti
-            sleep 3
 
-            # Check what port yeti is actually listening on
-            echo "=== Listening ports ==="
-            ss -tlnp | grep yeti || true
-
-            # Wait for health check (try both 443 and 9996)
             for i in $(seq 1 30); do
               sleep 2
               if curl -sk https://localhost/health > /dev/null 2>&1; then
-                echo "Yeti is healthy (port 443)"
+                echo "Yeti is healthy"
                 curl -sk https://localhost/health
                 exit 0
               fi
-              if curl -sk https://localhost:9996/health > /dev/null 2>&1; then
-                echo "Yeti is healthy (port 9996 - config override not applied)"
-                curl -sk https://localhost:9996/health
-                echo "WARNING: Server running on port 9996 instead of 443"
-                journalctl -u yeti --no-pager -n 5 | head -3
-                exit 0
-              fi
             done
-            echo "Health check failed on both ports"
+            echo "Health check failed"
             journalctl -u yeti --no-pager -n 30
             exit 1
           REMOTE

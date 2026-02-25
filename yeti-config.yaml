@@ -1,19 +1,30 @@
 # Yeti Server Configuration
-# Only include overrides — everything else uses sensible defaults.
+# Only override what you need — missing fields use sensible defaults.
+# Root directory is set in ~/.yeti/settings.toml (from yeti init).
 # Full reference: https://yetirocks.com/documentation/reference/server-config.html
 
 environment: production
-rootDirectory: /opt/yeti
+
 http:
   port: 443
+
 storage:
   mode: embedded
+
 logging:
   level: info
+
 tls:
   autoGenerate: true
 
-# Applications to deploy (git repos cloned by the GitHub Action, not parsed by Yeti)
+# Environment variables for extensions (OAuth, JWT, encryption).
+# Real environment variables take precedence over values here.
+# env:
+#   GITHUB_CLIENT_ID: ""
+#   GITHUB_CLIENT_SECRET: ""
+#   JWT_SECRET: ""
+
+# Applications to deploy (cloned by the GitHub Action, not parsed by Yeti)
 applications:
   - https://github.com/yetirocks/www
   - https://github.com/yetirocks/documentation
