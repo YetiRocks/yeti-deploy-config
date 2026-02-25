@@ -162,9 +162,9 @@ jobs:
             systemctl enable yeti
             systemctl start yeti
 
-            # Wait for health (longer timeout for first deploy with plugin compilation)
-            for i in $(seq 1 60); do
-              sleep 3
+            # Wait for health (first plugin compilation can take 5-10 min)
+            for i in $(seq 1 120); do
+              sleep 5
               if curl -sk https://localhost/health > /dev/null 2>&1; then
                 echo "Yeti is healthy"
                 curl -sk https://localhost/health
