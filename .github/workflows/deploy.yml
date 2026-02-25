@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  YETI_BINARY_URL: https://yeti-releases.us-east-1.linodeobjects.com/latest/yeti-linux-x86_64
+  YETI_BASE_URL: https://yeti-releases.us-east-1.linodeobjects.com/latest
 
 jobs:
   deploy:
@@ -15,15 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download yeti binary
+      - name: Download yeti platform
         run: |
-          HTTP_CODE=$(curl -sSL -w "%{http_code}" -o yeti "$YETI_BINARY_URL" 2>/dev/null)
-          if [ "$HTTP_CODE" != "200" ] || [ ! -s yeti ]; then
-            echo "::error::Failed to download yeti binary (HTTP $HTTP_CODE)"
-            exit 1
-          fi
+          # Binary
+          curl -sSL -o yeti "$YETI_BASE_URL/yeti-linux-x86_64"
           chmod +x yeti
           ./yeti --version
+
+          # Pre-compiled platform extensions (auth, telemetry, vectors, admin)
+          curl -sSL -o platform-extensions.tar.gz "$YETI_BASE_URL/platform-extensions-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Default vector model (BAAI/bge-small-en-v1.5)
+          curl -sSL -o default-model.tar.gz "$YETI_BASE_URL/default-model-bge-small-en-v1.5.tar.gz"
+
+          # yeti-core source (for compiling customer apps)
+          curl -sSL -o yeti-core-source.tar.gz "$YETI_BASE_URL/yeti-core-source.tar.gz"
 
       - name: Clone applications
         run: |
@@ -36,8 +42,16 @@ jobs:
           done
           ls applications/
 
-      - name: Install mdbook
+      - name: Install build tools
         run: |
+          # Rust toolchain for customer app compilation
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source "$HOME/.cargo/env"
+          rustc --version
+          # System deps for RocksDB
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libclang-dev llvm-dev > /dev/null 2>&1
+          # mdbook for documentation app
           curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           sudo mv mdbook /usr/local/bin/
 
@@ -48,7 +62,6 @@ jobs:
             config="$app_dir/config.yaml"
             [ -f "$config" ] || continue
 
-            # Extract build command from config.yaml
             build_cmd=$(grep -A2 'build:' "$config" | grep 'command:' | sed 's/.*command:\s*//')
             source_dir=$(grep -A2 'build:' "$config" | grep 'sourceDir:' | sed 's/.*sourceDir:\s*//')
             [ -n "$build_cmd" ] && [ -d "$app_dir/$source_dir" ] || continue
@@ -63,16 +76,38 @@ jobs:
             echo "  ✓ $app_name built"
           done
 
-      - name: Package deployment
+      - name: Package and compile
         run: |
+          source "$HOME/.cargo/env"
+
+          # Assemble deployment directory
           mkdir -p deploy
           cp yeti deploy/
           cp yeti-config.yaml deploy/
           cp -r applications deploy/
+
+          # Unpack pre-compiled platform extensions
+          mkdir -p deploy/cache/builds
+          tar xzf platform-extensions.tar.gz -C deploy/cache/builds
+
+          # Unpack default vector model
+          tar xzf default-model.tar.gz -C deploy/
+
+          # Unpack yeti-core source for customer app compilation
+          tar xzf yeti-core-source.tar.gz -C /tmp
+
+          # Compile customer-specific plugins (skips already-compiled platform extensions via cache)
+          YETI_CORE_PATH=/tmp/yeti-core deploy/yeti --build-only --dir deploy/
+
+          # Clean up source artifacts from package
           find deploy/applications -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "source" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "target" -type d -exec rm -rf {} + 2>/dev/null || true
+
+          echo "Compiled plugins:"
+          ls -lh deploy/cache/builds/target/debug/*.so 2>/dev/null || echo "  (none)"
+
           tar czf deploy.tar.gz -C deploy .
           echo "Package size: $(du -h deploy.tar.gz | cut -f1)"
 
@@ -101,31 +136,7 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
-            # Install Rust toolchain for plugin compilation
-            if [ -f "$HOME/.cargo/env" ]; then
-              source "$HOME/.cargo/env"
-            fi
-            if ! command -v cargo &> /dev/null; then
-              echo "Installing Rust toolchain..."
-              apt-get update -qq
-              apt-get install -y -qq libclang-dev llvm-dev build-essential pkg-config zlib1g-dev > /dev/null 2>&1
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-              source "$HOME/.cargo/env"
-            fi
-            rustc --version
-            cargo --version
-
-            # Clone yeti-core source for plugin compilation
-            if [ ! -d /opt/yeti-core/.git ]; then
-              echo "Cloning yeti-core source..."
-              git clone --depth 1 https://github.com/YetiRocks/yeti-core.git /opt/yeti-core
-            else
-              echo "Updating yeti-core source..."
-              git -C /opt/yeti-core pull --ff-only 2>/dev/null || git -C /opt/yeti-core fetch --depth 1 origin main && git -C /opt/yeti-core reset --hard origin/main
-            fi
-
             # Initialize if needed (creates dirs, certs, admin user, settings.toml)
-            # Bootstrap preserves existing yeti-config.yaml from the deployment package.
             NEEDS_INIT=false
             if [ ! -f /root/.yeti/settings.toml ]; then
               NEEDS_INIT=true
@@ -147,8 +158,6 @@ jobs:
           [Service]
           Type=simple
           WorkingDirectory=/opt/yeti
-          Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          Environment="YETI_CORE_PATH=/opt/yeti-core"
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
@@ -162,22 +171,15 @@ jobs:
             systemctl enable yeti
             systemctl start yeti
 
-            # Wait for health (first plugin compilation can take 5-10 min)
-            for i in $(seq 1 120); do
-              sleep 5
+            for i in $(seq 1 30); do
+              sleep 2
               if curl -sk https://localhost/health > /dev/null 2>&1; then
                 echo "Yeti is healthy"
                 curl -sk https://localhost/health
-                echo ""
-                echo "=== Startup logs ==="
-                journalctl -u yeti --no-pager -n 50
-                echo "=== Plugin check ==="
-                ls -la /opt/yeti/cache/builds/*/target/debug/*.so 2>/dev/null || echo "No compiled plugins found"
-                ls -la /opt/yeti/applications/demo-basic/resources/ 2>/dev/null || echo "No demo-basic resources dir"
                 exit 0
               fi
             done
             echo "Health check failed"
-            journalctl -u yeti --no-pager -n 30
+            journalctl -u yeti --no-pager -n 50
             exit 1
           REMOTE
