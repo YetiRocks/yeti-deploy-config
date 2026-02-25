@@ -158,6 +158,12 @@ jobs:
               if curl -sk https://localhost/health > /dev/null 2>&1; then
                 echo "Yeti is healthy"
                 curl -sk https://localhost/health
+                echo ""
+                echo "=== Startup logs ==="
+                journalctl -u yeti --no-pager -n 50
+                echo "=== Plugin check ==="
+                ls -la /opt/yeti/cache/builds/*/target/debug/*.so 2>/dev/null || echo "No compiled plugins found"
+                ls -la /opt/yeti/applications/demo-basic/resources/ 2>/dev/null || echo "No demo-basic resources dir"
                 exit 0
               fi
             done
