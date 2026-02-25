@@ -115,6 +115,15 @@ jobs:
             rustc --version
             cargo --version
 
+            # Clone yeti-core source for plugin compilation
+            if [ ! -d /opt/yeti-core/.git ]; then
+              echo "Cloning yeti-core source..."
+              git clone --depth 1 https://github.com/YetiRocks/yeti-core.git /opt/yeti-core
+            else
+              echo "Updating yeti-core source..."
+              git -C /opt/yeti-core pull --ff-only 2>/dev/null || git -C /opt/yeti-core fetch --depth 1 origin main && git -C /opt/yeti-core reset --hard origin/main
+            fi
+
             # Initialize if needed (creates dirs, certs, admin user, settings.toml)
             # Bootstrap preserves existing yeti-config.yaml from the deployment package.
             NEEDS_INIT=false
@@ -139,6 +148,7 @@ jobs:
           Type=simple
           WorkingDirectory=/opt/yeti
           Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Environment="YETI_CORE_PATH=/opt/yeti-core"
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
