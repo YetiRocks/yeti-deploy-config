@@ -101,6 +101,17 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
+            # Install Rust toolchain for plugin compilation
+            if ! command -v cargo &> /dev/null; then
+              echo "Installing Rust toolchain..."
+              apt-get update -qq
+              apt-get install -y -qq libclang-dev llvm-dev build-essential pkg-config zlib1g-dev > /dev/null 2>&1
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            fi
+            source "$HOME/.cargo/env"
+            rustc --version
+            cargo --version
+
             # Initialize if needed (creates dirs, certs, admin user, settings.toml)
             # Bootstrap preserves existing yeti-config.yaml from the deployment package.
             NEEDS_INIT=false
@@ -124,6 +135,7 @@ jobs:
           [Service]
           Type=simple
           WorkingDirectory=/opt/yeti
+          Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
@@ -136,8 +148,9 @@ jobs:
             systemctl enable yeti
             systemctl start yeti
 
-            for i in $(seq 1 30); do
-              sleep 2
+            # Wait for health (longer timeout for first deploy with plugin compilation)
+            for i in $(seq 1 60); do
+              sleep 3
               if curl -sk https://localhost/health > /dev/null 2>&1; then
                 echo "Yeti is healthy"
                 curl -sk https://localhost/health
