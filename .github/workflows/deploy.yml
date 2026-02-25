@@ -15,21 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download yeti platform
+      - name: Download yeti binary
         run: |
-          # Binary
           curl -sSL -o yeti "$YETI_BASE_URL/yeti-linux-x86_64"
           chmod +x yeti
           ./yeti --version
-
-          # Pre-compiled platform extensions (auth, telemetry, vectors, admin)
-          curl -sSL -o platform-extensions.tar.gz "$YETI_BASE_URL/platform-extensions-x86_64-unknown-linux-gnu.tar.gz"
-
-          # Default vector model (BAAI/bge-small-en-v1.5)
-          curl -sSL -o default-model.tar.gz "$YETI_BASE_URL/default-model-bge-small-en-v1.5.tar.gz"
-
-          # yeti-core source (for compiling customer apps)
-          curl -sSL -o yeti-core-source.tar.gz "$YETI_BASE_URL/yeti-core-source.tar.gz"
 
       - name: Clone applications
         run: |
@@ -44,13 +34,6 @@ jobs:
 
       - name: Install build tools
         run: |
-          # Rust toolchain for customer app compilation
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source "$HOME/.cargo/env"
-          rustc --version
-          # System deps for RocksDB
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libclang-dev llvm-dev > /dev/null 2>&1
           # mdbook for documentation app
           curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           sudo mv mdbook /usr/local/bin/
@@ -76,37 +59,17 @@ jobs:
             echo "  ✓ $app_name built"
           done
 
-      - name: Package and compile
+      - name: Package
         run: |
-          source "$HOME/.cargo/env"
-
-          # Assemble deployment directory
           mkdir -p deploy
           cp yeti deploy/
           cp yeti-config.yaml deploy/
           cp -r applications deploy/
 
-          # Unpack pre-compiled platform extensions
-          mkdir -p deploy/cache/builds
-          tar xzf platform-extensions.tar.gz -C deploy/cache/builds
-
-          # Unpack default vector model
-          tar xzf default-model.tar.gz -C deploy/
-
-          # Unpack yeti-core source for customer app compilation
-          tar xzf yeti-core-source.tar.gz -C /tmp
-
-          # Compile customer-specific plugins (skips already-compiled platform extensions via cache)
-          YETI_CORE_PATH=/tmp/yeti-core deploy/yeti --build-only --dir deploy/
-
-          # Clean up source artifacts from package
+          # Clean up source artifacts
           find deploy/applications -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "node_modules" -type d -exec rm -rf {} + 2>/dev/null || true
           find deploy/applications -name "source" -type d -exec rm -rf {} + 2>/dev/null || true
-          find deploy/applications -name "target" -type d -exec rm -rf {} + 2>/dev/null || true
-
-          echo "Compiled plugins:"
-          ls -lh deploy/cache/builds/target/debug/*.so 2>/dev/null || echo "  (none)"
 
           tar czf deploy.tar.gz -C deploy .
           echo "Package size: $(du -h deploy.tar.gz | cut -f1)"
@@ -136,6 +99,19 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
+            # Ensure Rust toolchain is installed (for plugin compilation on first start)
+            if ! command -v cargo &>/dev/null; then
+              echo "Installing Rust toolchain..."
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            fi
+            source "$HOME/.cargo/env" 2>/dev/null || true
+
+            # Ensure system deps for RocksDB compilation
+            if ! dpkg -l libclang-dev &>/dev/null 2>&1; then
+              apt-get update -qq
+              apt-get install -y -qq libclang-dev llvm-dev > /dev/null 2>&1
+            fi
+
             # Initialize if needed (creates dirs, certs, admin user, settings.toml)
             NEEDS_INIT=false
             if [ ! -f /root/.yeti/settings.toml ]; then
@@ -158,6 +134,7 @@ jobs:
           [Service]
           Type=simple
           WorkingDirectory=/opt/yeti
+          Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
@@ -171,15 +148,20 @@ jobs:
             systemctl enable yeti
             systemctl start yeti
 
-            for i in $(seq 1 30); do
+            # Longer timeout: first start compiles plugins (~5-10 min)
+            echo "Waiting for Yeti to start (plugins compile on first boot)..."
+            for i in $(seq 1 180); do
               sleep 2
               if curl -sk https://localhost/health > /dev/null 2>&1; then
                 echo "Yeti is healthy"
                 curl -sk https://localhost/health
                 exit 0
               fi
+              if [ $((i % 30)) -eq 0 ]; then
+                echo "  Still waiting... ($((i*2))s)"
+              fi
             done
-            echo "Health check failed"
+            echo "Health check failed after 6 minutes"
             journalctl -u yeti --no-pager -n 50
             exit 1
           REMOTE
