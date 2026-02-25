@@ -102,13 +102,16 @@ jobs:
             rm /tmp/deploy.tar.gz
 
             # Install Rust toolchain for plugin compilation
+            if [ -f "$HOME/.cargo/env" ]; then
+              source "$HOME/.cargo/env"
+            fi
             if ! command -v cargo &> /dev/null; then
               echo "Installing Rust toolchain..."
               apt-get update -qq
               apt-get install -y -qq libclang-dev llvm-dev build-essential pkg-config zlib1g-dev > /dev/null 2>&1
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              source "$HOME/.cargo/env"
             fi
-            source "$HOME/.cargo/env"
             rustc --version
             cargo --version
 
@@ -139,6 +142,7 @@ jobs:
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
+          LimitNOFILE=65536
           AmbientCapabilities=CAP_NET_BIND_SERVICE
 
           [Install]
