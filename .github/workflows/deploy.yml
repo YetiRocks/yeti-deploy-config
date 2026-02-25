@@ -21,6 +21,9 @@ jobs:
           chmod +x yeti
           ./yeti --version
 
+          # yeti-core source (for plugin compilation on server)
+          curl -sSfL -o yeti-core-source.tar.gz "$YETI_BASE_URL/yeti-core-source.tar.gz" || echo "Warning: yeti-core source not available"
+
       - name: Clone applications
         run: |
           mkdir -p applications
@@ -34,7 +37,6 @@ jobs:
 
       - name: Install build tools
         run: |
-          # mdbook for documentation app
           curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v0.5.2/mdbook-v0.5.2-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           sudo mv mdbook /usr/local/bin/
 
@@ -65,6 +67,12 @@ jobs:
           cp yeti deploy/
           cp yeti-config.yaml deploy/
           cp -r applications deploy/
+
+          # Include yeti-core source for server-side plugin compilation
+          if [ -f yeti-core-source.tar.gz ]; then
+            mkdir -p deploy/yeti-core-source
+            tar xzf yeti-core-source.tar.gz -C deploy/yeti-core-source --strip-components=1
+          fi
 
           # Clean up source artifacts
           find deploy/applications -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
@@ -99,20 +107,23 @@ jobs:
             tar xzf /tmp/deploy.tar.gz -C /opt/yeti
             rm /tmp/deploy.tar.gz
 
-            # Ensure Rust toolchain is installed (for plugin compilation on first start)
+            # Clear stale plugin cache (prevents ABI mismatch SEGV)
+            rm -rf /opt/yeti/cache/builds
+
+            # Ensure Rust toolchain is installed
             if ! command -v cargo &>/dev/null; then
               echo "Installing Rust toolchain..."
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             fi
             source "$HOME/.cargo/env" 2>/dev/null || true
 
-            # Ensure system deps for RocksDB compilation
+            # Ensure system deps for RocksDB
             if ! dpkg -l libclang-dev &>/dev/null 2>&1; then
               apt-get update -qq
               apt-get install -y -qq libclang-dev llvm-dev > /dev/null 2>&1
             fi
 
-            # Initialize if needed (creates dirs, certs, admin user, settings.toml)
+            # Initialize if needed
             NEEDS_INIT=false
             if [ ! -f /root/.yeti/settings.toml ]; then
               NEEDS_INIT=true
@@ -135,6 +146,7 @@ jobs:
           Type=simple
           WorkingDirectory=/opt/yeti
           Environment="PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Environment="YETI_CORE_PATH=/opt/yeti/yeti-core-source"
           ExecStart=/opt/yeti/yeti -f
           Restart=always
           RestartSec=5
@@ -148,7 +160,7 @@ jobs:
             systemctl enable yeti
             systemctl start yeti
 
-            # Longer timeout: first start compiles plugins (~5-10 min)
+            # Plugins compile on first start (~5-10 min)
             echo "Waiting for Yeti to start (plugins compile on first boot)..."
             for i in $(seq 1 180); do
               sleep 2
